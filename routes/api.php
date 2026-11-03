@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\ChatSessionController;
@@ -27,6 +28,7 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::delete('/chat/sessions/{session}', [ChatSessionController::class, 'destroy'])->whereNumber('session');
 
     Route::get('/instructors', [DirectoryController::class, 'instructors'])->middleware('can:admin');
+    Route::get('/admin/audit-logs', [AuditLogController::class, 'index'])->middleware('can:admin');
 });
 
 // OpenAI-compatible API for Open WebUI. Base URL: http://<host>:8000/api/v1
