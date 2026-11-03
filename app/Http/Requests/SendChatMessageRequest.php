@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoCredentials;
 use Illuminate\Foundation\Http\FormRequest;
 
 class SendChatMessageRequest extends FormRequest
@@ -16,7 +17,7 @@ class SendChatMessageRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'message' => ['required', 'string', 'max:'.config('chat.max_message_length')],
+            'message' => ['required', 'string', 'max:'.config('chat.max_message_length'), new NoCredentials],
             'session_id' => ['nullable', 'integer'],
             // Admins / instructors asking about one student (checked by the "view-student" gate).
             'act_as_student' => ['nullable', 'digits:9'],

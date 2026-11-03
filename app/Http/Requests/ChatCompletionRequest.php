@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoCredentials;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
@@ -39,6 +40,8 @@ class ChatCompletionRequest extends FormRequest
                     $validator->errors()->add('messages', 'The last message must come from the user.');
                 } elseif (mb_strlen($last['content']) > config('chat.max_message_length') && ! $this->isTask()) {
                     $validator->errors()->add('messages', 'The message is too long.');
+                } elseif (! $this->isTask() && NoCredentials::found($last['content'])) {
+                    $validator->errors()->add('messages', NoCredentials::MESSAGE);
                 }
             },
         ];
