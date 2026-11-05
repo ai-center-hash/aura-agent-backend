@@ -2,6 +2,8 @@
 
 namespace App\Http\Resources;
 
+use App\Enums\MessageRole;
+use App\Services\Chat\ChatService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -19,6 +21,8 @@ class ChatMessageResource extends JsonResource
             'role' => $this->role,
             'content' => $this->content,
             'tools_used' => $this->metadata['tools_used'] ?? [],
+            // Assistant answers only; null for the user's own messages.
+            'usage' => $this->role === MessageRole::Assistant ? ChatService::usage($this->metadata) : null,
             'created_at' => $this->created_at,
         ];
     }

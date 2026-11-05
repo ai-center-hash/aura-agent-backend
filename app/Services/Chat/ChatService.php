@@ -156,7 +156,13 @@ class ChatService
                         );
 
                     case 'done':
-                        $stats = ['tools_used' => $data['tools_used'] ?? [], 'latency_ms' => $data['latency_ms'] ?? null];
+                        // Token counts are null until AURA-AGENT reports them in its done event.
+                        $stats = [
+                            'tools_used' => $data['tools_used'] ?? [],
+                            'latency_ms' => $data['latency_ms'] ?? null,
+                            'prompt_tokens' => isset($data['prompt_tokens']) ? (int) $data['prompt_tokens'] : null,
+                            'completion_tokens' => isset($data['completion_tokens']) ? (int) $data['completion_tokens'] : null,
+                        ];
                         $trace->llmFinished($stats);
 
                         $result = $this->persist($session, $question, $content, $stats);
@@ -167,7 +173,9 @@ class ChatService
                             'session_id' => $result['session']->id,
                             'message_id' => $result['message']->id,
                             'acting_as' => $actAs?->studentCode,
-                            ...$stats,
+                            'tools_used' => $stats['tools_used'],
+                            'latency_ms' => $stats['latency_ms'],
+                            'usage' => self::usage($stats),
                         ];
 
                         return $result;
@@ -238,6 +246,24 @@ class ChatService
         $session->user()->associate($user);
 
         return $session;
+    }
+
+    /**
+     * Token usage of one answer, as sent to API clients. Every field is null
+     * when the engine did not report it (older messages, AURA-AGENT without usage).
+     *
+     * @return array{prompt_tokens: ?int, completion_tokens: ?int, total_tokens: ?int}
+     */
+    public static function usage(?array $stats): array
+    {
+        $prompt = $stats['prompt_tokens'] ?? null;
+        $completion = $stats['completion_tokens'] ?? null;
+
+        return [
+            'prompt_tokens' => $prompt,
+            'completion_tokens' => $completion,
+            'total_tokens' => $prompt === null && $completion === null ? null : (int) $prompt + (int) $completion,
+        ];
     }
 
     /**

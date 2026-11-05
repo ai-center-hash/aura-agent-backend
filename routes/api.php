@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\ChatSessionController;
 use App\Http\Controllers\Api\DirectoryController;
 use App\Http\Controllers\Api\OpenAiController;
+use App\Http\Controllers\Api\UsageController;
 use Illuminate\Support\Facades\Route;
 
 // Public: swap a YRU Passport access token for a Sanctum API token.
@@ -14,6 +15,7 @@ Route::post('/auth/yru-passport', [AuthController::class, 'exchangePassportToken
 
 Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
+    Route::get('/me/usage', [UsageController::class, 'me']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);
 
     // Calls RAG + Ollama: stricter limiter on top of the general one.
@@ -29,6 +31,7 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
 
     Route::get('/instructors', [DirectoryController::class, 'instructors'])->middleware('can:admin');
     Route::get('/admin/audit-logs', [AuditLogController::class, 'index'])->middleware('can:admin');
+    Route::get('/admin/usage', [UsageController::class, 'index'])->middleware('can:admin');
 });
 
 // OpenAI-compatible API for Open WebUI. Base URL: http://<host>:8000/api/v1
