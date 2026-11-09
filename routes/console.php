@@ -38,3 +38,7 @@ Artisan::command('app:create-admin {email} {--name=} {--password=}', function (s
 // Deletes audit_logs / ai_requests rows past their retention (config/logging.php).
 // Runs in the "scheduler" container (docker-compose.yml).
 Schedule::command('model:prune')->dailyAt('03:00')->timezone('Asia/Bangkok');
+
+// Emails HEALTH_ALERT_EMAILS when a service goes down, stays down or recovers (config/monitoring.php).
+// No withoutOverlapping(): its lock lives in the database cache, and this must run while MySQL is down.
+Schedule::command('app:health-check')->everyMinute();
