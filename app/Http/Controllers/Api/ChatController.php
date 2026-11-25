@@ -36,6 +36,7 @@ class ChatController extends Controller
                 $request->sessionId(),
                 $this->isConsole($request) ? 'console' : 'api',
                 $actAs,
+                $request->agent(),
             );
         } finally {
             $lock->release();
@@ -44,6 +45,7 @@ class ChatController extends Controller
         return response()->json([
             'session_id' => $result['session']->id,
             'title' => $result['session']->title,
+            'agent' => $result['session']->agent->value,
             'message' => new ChatMessageResource($result['message']),
         ], 201);
     }
@@ -60,20 +62,24 @@ class ChatController extends Controller
         $sessionId = $request->sessionId();
         $channel = $this->isConsole($request) ? 'console' : 'api_stream';
         $actAs = $this->actAs($request);
+        $agent = $request->agent();
 
-        // Check ownership now: once the stream starts, headers are sent and a 404 is no longer possible.
+        // Check ownership (and agent) now: once the stream starts, headers are sent
+        // and a 404 / 422 is no longer possible.
         if ($sessionId !== null) {
-            $user->chatSessions()->findOrFail($sessionId);
+            $session = $user->chatSessions()->findOrFail($sessionId);
+
+            abort_unless($agent === null || $session->agent === $agent, 422, ChatService::agentMismatch($session->agent));
         }
 
         $lock = $this->acquireUserLock($user->id);
 
-        return response()->eventStream(function () use ($lock, $user, $question, $sessionId, $channel, $actAs) {
+        return response()->eventStream(function () use ($lock, $user, $question, $sessionId, $channel, $actAs, $agent) {
             // Keep running after a client disconnect so the loop can stop cleanly and release the lock.
             ignore_user_abort(true);
 
             try {
-                foreach ($this->chat->stream($user, $question, $sessionId, $channel, $actAs) as $event) {
+                foreach ($this->chat->stream($user, $question, $sessionId, $channel, $actAs, $agent) as $event) {
                     yield new StreamedEvent(event: $event['type'], data: $event);
                 }
             } catch (UpstreamServiceException $e) {

@@ -7,6 +7,8 @@ use App\Http\Controllers\Concerns\LocksChatPerUser;
 use App\Http\Controllers\Controller;
 use App\Http\Middleware\AuthenticateOpenWebUi;
 use App\Http\Requests\ChatCompletionRequest;
+use App\Enums\Agent;
+use App\Services\Agent\AgentRegistry;
 use App\Services\Chat\AiTrace;
 use App\Services\Chat\ChatService;
 use App\Services\Llm\OllamaClient;
@@ -17,32 +19,41 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
 /**
- * OpenAI-compatible API so Open WebUI can use Aura as a model.
+ * OpenAI-compatible API so Open WebUI can use the agents (AURA, FREYA) as models.
  * In Open WebUI: Admin → Settings → Connections → OpenAI API, URL http://host.docker.internal:8000/api/v1
  */
 class OpenAiController extends Controller
 {
     use LocksChatPerUser;
 
+    /** Model id echoed back in responses: the one the request picked. */
+    private string $model;
+
     public function __construct(
         private readonly ChatService $chat,
         private readonly OllamaClient $llm,
-    ) {}
+        private readonly AgentRegistry $agents,
+    ) {
+        $this->model = Agent::Aura->modelId();
+    }
 
     /**
-     * GET /api/v1/models
+     * GET /api/v1/models — one model per agent that is configured (URL + key).
+     * AURA is always listed so Open WebUI keeps its original model.
      */
     public function models(): JsonResponse
     {
-        return response()->json([
-            'object' => 'list',
-            'data' => [[
-                'id' => config('openwebui.model_id'),
+        $data = collect(Agent::cases())
+            ->filter(fn (Agent $agent) => $agent === Agent::Aura || $this->agents->for($agent)->enabled())
+            ->map(fn (Agent $agent) => [
+                'id' => $agent->modelId(),
                 'object' => 'model',
                 'created' => 1760918400,
                 'owned_by' => 'yru',
-            ]],
-        ]);
+            ])
+            ->values();
+
+        return response()->json(['object' => 'list', 'data' => $data]);
     }
 
     /**
@@ -52,6 +63,9 @@ class OpenAiController extends Controller
     {
         $user = $request->user();
         $stream = $request->boolean('stream');
+        // The model picked in Open WebUI decides which agent answers (unknown/empty = AURA).
+        $agent = Agent::fromModelId($request->input('model'));
+        $this->model = $agent->modelId();
 
         // Title/tag/follow-up generation: plain Ollama call, no chat history saved.
         if ($request->isTask()) {
@@ -66,8 +80,14 @@ class OpenAiController extends Controller
         // X-OpenWebUI-Chat-Id is forwarded together with the user headers. Without it,
         // fall back to grouping by the conversation's first question.
         $externalId = $request->header('X-OpenWebUI-Chat-Id') ?: 'hash:'.sha1($request->firstQuestion());
-        $session = $this->chat->sessionForExternalChat($user, $externalId, $request->firstQuestion());
         $question = $request->question();
+
+        try {
+            $session = $this->chat->sessionForExternalChat($user, $externalId, $request->firstQuestion(), $agent);
+        } catch (UpstreamServiceException $e) {
+            // AGENT_MISMATCH: model switched in the middle of a chat.
+            return AuthenticateOpenWebUi::error($e->getMessage(), $e->errorCode ?? $e->service, $e->status);
+        }
 
         $lock = $this->acquireUserLock($user->id);
 
@@ -144,7 +164,7 @@ class OpenAiController extends Controller
             'id' => 'chatcmpl-'.Str::random(24),
             'object' => 'chat.completion',
             'created' => time(),
-            'model' => config('openwebui.model_id'),
+            'model' => $this->model,
             'choices' => [[
                 'index' => 0,
                 'message' => ['role' => 'assistant', 'content' => $content],
@@ -180,7 +200,7 @@ class OpenAiController extends Controller
                 'id' => $id,
                 'object' => 'chat.completion.chunk',
                 'created' => $created,
-                'model' => config('openwebui.model_id'),
+                'model' => $this->model,
                 'choices' => [['index' => 0, 'delta' => $delta ?: new \stdClass, 'finish_reason' => $finish]],
                 'usage' => $usage,
             ], fn ($v) => $v !== null);

@@ -44,6 +44,8 @@
     .chip:hover { border-color: var(--accent); color: var(--accent); }
     .composer { display: flex; gap: 10px; padding: 12px 16px 16px; background: var(--bg); }
     .composer textarea { flex: 1; resize: none; min-height: 46px; max-height: 180px; }
+    .composer .agent-select { flex: 0 0 auto; width: auto; min-height: 46px; }
+    .agent-badge { font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); margin-right: 6px; flex: 0 0 auto; }
 
     /* Inspector */
     .card { background: var(--surface-2); border-radius: var(--radius); padding: 14px; display: grid; gap: 10px; }
@@ -75,6 +77,11 @@
     // Everyone asks in their own name; AURA-AGENT scopes answers to the Passport token
     // (instructors see their advisees). The act_as_student API stays for a future support mode.
     $isInstructor = $role === \App\Enums\UserRole::Instructor;
+    // Agents a new chat can be held with: AURA always, others once their URL + key are set.
+    $registry = app(\App\Services\Agent\AgentRegistry::class);
+    $agents = collect(\App\Enums\Agent::cases())
+        ->filter(fn ($a) => $a === \App\Enums\Agent::Aura || $registry->for($a)->enabled())
+        ->mapWithKeys(fn ($a) => [$a->value => $a->label()]);
 @endphp
 <div class="app">
     @include('console._topbar', ['active' => 'chat'])
@@ -89,6 +96,11 @@
         <main class="chat">
             <div class="messages" id="messages"></div>
             <form class="composer" id="composer">
+                <select class="input agent-select" id="agent" title="ผู้ช่วยของแชทนี้ (เปลี่ยนได้เฉพาะแชทใหม่)" @if ($agents->count() < 2) hidden @endif>
+                    @foreach ($agents as $value => $label)
+                        <option value="{{ $value }}">{{ $label }}</option>
+                    @endforeach
+                </select>
                 <textarea class="input" id="input" rows="1" placeholder="พิมพ์คำถาม… (Enter ส่ง, Shift+Enter ขึ้นบรรทัดใหม่)" maxlength="{{ config('chat.max_message_length') }}"></textarea>
                 <button class="btn btn-primary" id="send" type="submit">ส่ง</button>
             </form>
@@ -114,7 +126,7 @@
                     <div class="stat"><div class="stat-label">จำนวน tool</div><div class="stat-value" id="s-tool-count">–</div></div>
                 </div>
                 <div>
-                    <div class="stat-label" style="margin-bottom:4px;">Tools ที่ AURA-AGENT ใช้</div>
+                    <div class="stat-label" style="margin-bottom:4px;">Tools ที่ agent ใช้</div>
                     <div id="s-tools" class="muted" style="font-size:12.5px;">–</div>
                 </div>
             </section>
@@ -166,6 +178,7 @@
         if (!data.length) { list.append(el('p', 'muted', 'ยังไม่มีประวัติ')); return; }
         for (const s of data) {
             const row = el('div', 'session' + (s.id === currentSession ? ' active' : ''));
+            if (s.agent && s.agent !== 'aura') row.append(el('span', 'agent-badge', s.agent.toUpperCase()));
             row.append(el('span', 'session-title', s.title));
             const del = el('button', 'session-del', '×');
             del.title = 'ลบแชทนี้';
@@ -188,6 +201,7 @@
         if (!res.ok) return;
         const { data } = await res.json();
         currentSession = data.id;
+        setAgent(data.agent, true);
         const box = $('messages');
         box.replaceChildren();
         for (const m of data.messages) addMessage(m.role, m.content, m.tools_used);
@@ -195,8 +209,16 @@
         loadSessions();
     }
 
+    // A session stays with its agent: the picker is locked while one is open.
+    function setAgent(value, locked) {
+        const select = $('agent');
+        if (value && [...select.options].some((o) => o.value === value)) select.value = value;
+        select.disabled = locked;
+    }
+
     function newChat() {
         currentSession = null;
+        setAgent(null, false);
         renderEmpty();
         loadSessions();
         $('input').focus();
@@ -206,9 +228,14 @@
     function renderEmpty() {
         const wrap = el('div', 'empty');
         wrap.append(el('h2', null, 'ทดสอบการถามตอบ'));
-        wrap.append(el('p', 'muted', 'คำถามส่งไปที่ AURA-AGENT จริง ต้อง login ด้วย YRU Passport: นักศึกษาดูความคืบหน้าของตัวเองได้ อาจารย์และบุคลากรค้นหารอบกิจกรรมที่เปิดรับสมัครได้'));
+        const freya = $('agent').value === 'freya';
+        wrap.append(el('p', 'muted', freya
+            ? 'คำถามส่งไปที่ FREYA-AGENT (งานทะเบียน: ลงทะเบียน เกรด ตรวจจบ ค่าเทอม) ถ้าไม่ได้ login ด้วย YRU Passport จะได้คำตอบแค่กติกากลาง'
+            : 'คำถามส่งไปที่ AURA-AGENT จริง ต้อง login ด้วย YRU Passport: นักศึกษาดูความคืบหน้าของตัวเองได้ อาจารย์และบุคลากรค้นหารอบกิจกรรมที่เปิดรับสมัครได้'));
         const chips = el('div', 'chips');
-        for (const q of (isInstructor
+        for (const q of (freya
+            ? ['เทอมนี้ลงกี่หน่วยกิต', 'เกรดเฉลี่ยสะสมเท่าไร', 'ค่าเทอมเทอมนี้เท่าไร']
+            : isInstructor
             ? ['นักศึกษาในที่ปรึกษามีใครบ้าง', 'ใครยังทำกิจกรรมไม่ครบ', 'มีกิจกรรมอะไรเปิดรับสมัครบ้าง']
             : ['ผมยังขาดกิจกรรมหมวดไหน', 'มีกิจกรรมอะไรกำลังจะเปิด', 'แนะนำกิจกรรมให้ครบหน่อย'])) {
             const chip = el('button', 'chip', q);
@@ -263,7 +290,10 @@
         const question = input.value.trim();
         if (!question || busy) return;
 
-        const payload = { message: question, session_id: currentSession };
+        // The agent only matters for a new chat; an open session keeps its own.
+        const payload = currentSession
+            ? { message: question, session_id: currentSession }
+            : { message: question, agent: $('agent').value };
 
         busy = true;
         $('send').disabled = true;
@@ -276,7 +306,7 @@
         const statusLine = el('div', 'msg-status');
         msg.prepend(statusLine);
         setStats({});
-        $('s-tools').textContent = 'กำลังถาม AURA-AGENT…';
+        $('s-tools').textContent = `กำลังถาม ${$('agent').selectedOptions[0]?.text ?? 'agent'}…`;
 
         const started = performance.now();
         let firstToken = null;
@@ -354,7 +384,7 @@
         const res = await api('/console/status');
         if (!res.ok) { box.textContent = await errorMessage(res); return; }
         const data = await res.json();
-        const labels = { agent: 'AURA-AGENT', database: 'MySQL', ollama: 'Ollama (Open WebUI)' };
+        const labels = { agent: 'AURA-AGENT', freya: 'FREYA-AGENT', database: 'MySQL', ollama: 'Ollama (Open WebUI)' };
         box.replaceChildren();
         const grid = el('div', 'status-row');
         for (const [key, label] of Object.entries(labels)) {
@@ -380,6 +410,8 @@
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
     });
     $('new-chat').onclick = newChat;
+    // Switching agent on an empty chat refreshes the intro text and sample questions.
+    $('agent').addEventListener('change', () => { if (!currentSession) renderEmpty(); });
 
     renderEmpty();
     loadSessions();

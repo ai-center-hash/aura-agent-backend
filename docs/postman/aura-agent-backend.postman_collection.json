@@ -1,0 +1,1302 @@
+{
+  "info": {
+    "_postman_id": "ecc9fc97-c587-503c-9779-9d2408d354c2",
+    "name": "AURA Agent Backend",
+    "description": "API ของ aura-agent-backend (Laravel) ที่อยู่หน้า AURA-AGENT และ FREYA-AGENT\n\n**เริ่มใช้**\n1. เลือก environment `AURA Agent Backend — Local` แล้วใส่ `passportAccessToken`\n2. รัน `Auth / Exchange YRU Passport token → API token` ระบบจะเก็บ `apiToken` ให้เอง\n3. request อื่นใช้ Bearer `{{apiToken}}` จาก collection auth\n\nทุก request ส่ง `Accept: application/json` เพื่อให้ Laravel ตอบ error เป็น JSON\n\nthrottle: `api` 60/นาที · `chat` 10/นาที + 300/วัน · `auth` 10/นาที/IP",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{apiToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Login ด้วย YRU Passport token แล้วรับ Sanctum API token",
+      "item": [
+        {
+          "name": "Exchange YRU Passport token → API token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/yru-passport",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "yru-passport"
+              ]
+            },
+            "description": "แลก access token จาก YRU Passport (ได้จาก OAuth ฝั่ง frontend/mobile) เป็น Sanctum API token\n\n- throttle `auth`: 10 ครั้ง/นาที/IP\n- token มีอายุ `API_TOKEN_TTL_DAYS` (default 7 วัน)\n- test script เก็บ `token` ไว้ใน collection variable `apiToken` ให้ request อื่นใช้ต่อ",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"access_token\": \"{{passportAccessToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const j = pm.response.json();",
+                  "pm.collectionVariables.set(\"apiToken\", j.token);",
+                  "pm.test(\"token issued\", () => pm.expect(j.token).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "me"
+              ]
+            },
+            "description": "ข้อมูลผู้ใช้ที่ login อยู่ + `role`: admin | instructor | student | staff | null (ไม่ได้ login ผ่าน Passport)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Chat",
+      "description": "ถามคำถามผ่าน AURA / FREYA",
+      "item": [
+        {
+          "name": "Ask AURA (new session)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "ถามคำถาม ระบบส่งต่อไปยัง agent แล้วเก็บประวัติไว้\n\n**agent**: `aura` (กิจกรรมนักศึกษา, default) หรือ `freya` (งานทะเบียน: ลงทะเบียน เกรด ตรวจจบ ค่าเทอม)\n- ห้องแชท 1 ห้องผูกกับ agent เดียว ส่ง `agent` ต่างจากของห้องเดิม → 422\n- ผู้ใช้ที่ไม่มี Passport login ถาม Freya ได้แบบ guest (ได้แค่กติกากลาง) ส่วน AURA ต้องมี Passport\n\n**จำกัด**: message ≤ 1000 ตัวอักษร · throttle `chat` 10/นาที, 300/วัน ต่อผู้ใช้ (429)\n\n**error ที่พบบ่อย** (HTTP status ตาม UpstreamServiceException): PASSPORT_REQUIRED 401 · TOKEN_EXPIRED 401 · NOT_STUDENT 403 · AGENT_UNAVAILABLE / UPSTREAM_UNAVAILABLE / LLM_UNAVAILABLE 503",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"มีกิจกรรมอะไรเปิดรับสมัครบ้าง\",\n  \"agent\": \"aura\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const j = pm.response.json();",
+                  "if (j.session_id) pm.collectionVariables.set(\"sessionId\", j.session_id);",
+                  "pm.test(\"has answer\", () => pm.expect(j.message.content).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ask FREYA (new session)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "สร้างห้องใหม่ที่คุยกับ FREYA-AGENT · เก็บ `session_id` ไว้ใน `freyaSessionId`\n\nถามคำถาม ระบบส่งต่อไปยัง agent แล้วเก็บประวัติไว้\n\n**agent**: `aura` (กิจกรรมนักศึกษา, default) หรือ `freya` (งานทะเบียน: ลงทะเบียน เกรด ตรวจจบ ค่าเทอม)\n- ห้องแชท 1 ห้องผูกกับ agent เดียว ส่ง `agent` ต่างจากของห้องเดิม → 422\n- ผู้ใช้ที่ไม่มี Passport login ถาม Freya ได้แบบ guest (ได้แค่กติกากลาง) ส่วน AURA ต้องมี Passport\n\n**จำกัด**: message ≤ 1000 ตัวอักษร · throttle `chat` 10/นาที, 300/วัน ต่อผู้ใช้ (429)\n\n**error ที่พบบ่อย** (HTTP status ตาม UpstreamServiceException): PASSPORT_REQUIRED 401 · TOKEN_EXPIRED 401 · NOT_STUDENT 403 · AGENT_UNAVAILABLE / UPSTREAM_UNAVAILABLE / LLM_UNAVAILABLE 503",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"เทอมนี้ลงกี่หน่วยกิต\",\n  \"agent\": \"freya\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const j = pm.response.json();",
+                  "if (j.session_id) pm.collectionVariables.set(\"freyaSessionId\", j.session_id);",
+                  "pm.test(\"has answer\", () => pm.expect(j.message.content).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Continue FREYA session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "คุยต่อในห้องเดิม (ไม่ต้องส่ง `agent` ระบบใช้ agent ของห้อง)",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"แล้วเกรดเฉลี่ยสะสมเท่าไร\",\n  \"session_id\": \"{{freyaSessionId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", () => pm.expect(pm.response.code).to.be.oneOf([201]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ask FREYA — stream (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat/stream",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat",
+                "stream"
+              ]
+            },
+            "description": "เหมือน `POST /api/chat` แต่ตอบเป็น Server-Sent Events\n\n| event | data |\n|---|---|\n| `status` | `{type, text}` agent กำลังเรียกเครื่องมือ เช่น \"กำลังดูผลการเรียน...\" |\n| `delta` | `{type, content}` ข้อความทีละชิ้น ต่อกันตามลำดับ (Markdown) |\n| `done` | `{type, session_id, message_id, agent, acting_as, tools_used, latency_ms, usage}` |\n| `error` | `{message, code}` (ส่งแทน `done`, HTTP 200) |\n\nการตรวจสิทธิ์ห้องและ agent (404 / 422) ทำก่อนเริ่ม stream",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"ตรวจสอบจบให้หน่อย\",\n  \"agent\": \"freya\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Agent mismatch → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "ตัวอย่าง error: ห้องนี้เป็นของ FREYA แต่ขอ `agent: aura` → 422",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"มีกิจกรรมอะไรบ้าง\",\n  \"session_id\": \"{{freyaSessionId}}\",\n  \"agent\": \"aura\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 422\", () => pm.expect(pm.response.code).to.be.oneOf([422]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ask about a student (admin, act-as)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "แอดมินถามแทนนักศึกษา (gate `view-student`, บันทึก audit log)\n\n- `act_as_student` เลขนักศึกษา 9 หลัก, `reason` บังคับ (≤ 200)\n- ต้องรอ AURA-AGENT เปิด support mode (`AURA_AGENT_SUPPORT_KEY`) ไม่อย่างนั้น 503 SUPPORT_UNAVAILABLE\n- FREYA ไม่รองรับ → 503 SUPPORT_UNAVAILABLE\n- ไม่มีสิทธิ์ → 403",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"นักศึกษาคนนี้ทำกิจกรรมครบหรือยัง\",\n  \"act_as_student\": \"{{studentCode}}\",\n  \"reason\": \"ตรวจสอบตามคำร้องของนักศึกษา\",\n  \"agent\": \"aura\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201 or 403 or 503\", () => pm.expect(pm.response.code).to.be.oneOf([201, 403, 503]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Chat sessions",
+      "description": "ประวัติห้องแชท",
+      "item": [
+        {
+          "name": "List sessions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat/sessions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat",
+                "sessions"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "ห้องแชทของผู้ใช้ เรียงตามล่าสุด หน้าละ 20 (มี `agent` ในแต่ละห้อง)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Show session (with messages)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat/sessions/{{freyaSessionId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat",
+                "sessions",
+                "{{freyaSessionId}}"
+              ]
+            },
+            "description": "ห้องพร้อมข้อความทั้งหมด · ห้องของคนอื่น → 404"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rename session",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat/sessions/{{freyaSessionId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat",
+                "sessions",
+                "{{freyaSessionId}}"
+              ]
+            },
+            "description": "เปลี่ยนชื่อห้อง (`title` ≤ 255)",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"สรุปหน่วยกิตเทอมนี้\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete session",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/chat/sessions/{{sessionId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "chat",
+                "sessions",
+                "{{sessionId}}"
+              ]
+            },
+            "description": "ลบห้อง + สั่ง agent ของห้องนั้นลืมความจำ (best effort, ต้องมี Passport token) → 204"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 204\", () => pm.expect(pm.response.code).to.be.oneOf([204]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Usage",
+      "description": "สถิติการใช้งานของตัวเอง",
+      "item": [
+        {
+          "name": "My usage",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/me/usage",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "me",
+                "usage"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "2026-11-01",
+                  "disabled": true,
+                  "description": "Y-m-d (default: 30 วันก่อน to)"
+                },
+                {
+                  "key": "to",
+                  "value": "2026-11-25",
+                  "disabled": true,
+                  "description": "Y-m-d (default: วันนี้) · ช่วงไม่เกิน 366 วัน"
+                }
+              ]
+            },
+            "description": "จำนวนคำถามและ token ของผู้ใช้เอง รวม + รายวัน"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "description": "ต้องเป็น admin (gate `admin`) ไม่อย่างนั้น 403",
+      "item": [
+        {
+          "name": "Instructors",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/instructors",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "instructors"
+              ]
+            },
+            "description": "รายชื่ออาจารย์ (admin เท่านั้น)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Audit logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/audit-logs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "audit-logs"
+              ],
+              "query": [
+                {
+                  "key": "event",
+                  "value": "auth.",
+                  "disabled": true
+                },
+                {
+                  "key": "user_id",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "username",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "from",
+                  "value": "2026-11-01",
+                  "disabled": true,
+                  "description": "Y-m-d (default: 30 วันก่อน to)"
+                },
+                {
+                  "key": "to",
+                  "value": "2026-11-25",
+                  "disabled": true,
+                  "description": "Y-m-d (default: วันนี้) · ช่วงไม่เกิน 366 วัน"
+                },
+                {
+                  "key": "per_page",
+                  "value": "50",
+                  "disabled": true,
+                  "description": "1–100"
+                }
+              ]
+            },
+            "description": "audit log ล่าสุดก่อน · `event` ใส่ชื่อเต็ม (`auth.logout`) หรือ prefix ลงท้ายด้วยจุด (`auth.`)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Usage (per day)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/usage?group_by=day",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "usage"
+              ],
+              "query": [
+                {
+                  "key": "group_by",
+                  "value": "day"
+                },
+                {
+                  "key": "from",
+                  "value": "2026-11-01",
+                  "disabled": true,
+                  "description": "Y-m-d (default: 30 วันก่อน to)"
+                },
+                {
+                  "key": "to",
+                  "value": "2026-11-25",
+                  "disabled": true,
+                  "description": "Y-m-d (default: วันนี้) · ช่วงไม่เกิน 366 วัน"
+                }
+              ]
+            },
+            "description": "การใช้งานของทุกคน รายวัน"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Usage (per user)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/usage?group_by=user",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "usage"
+              ],
+              "query": [
+                {
+                  "key": "group_by",
+                  "value": "user"
+                },
+                {
+                  "key": "username",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "user_id",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "per_page",
+                  "value": "20",
+                  "disabled": true,
+                  "description": "1–100"
+                },
+                {
+                  "key": "from",
+                  "value": "2026-11-01",
+                  "disabled": true,
+                  "description": "Y-m-d (default: 30 วันก่อน to)"
+                },
+                {
+                  "key": "to",
+                  "value": "2026-11-25",
+                  "disabled": true,
+                  "description": "Y-m-d (default: วันนี้) · ช่วงไม่เกิน 366 วัน"
+                }
+              ]
+            },
+            "description": "การใช้งานรายผู้ใช้ เรียงจากใช้มากสุด แบ่งหน้า"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OpenAI-compatible (Open WebUI)",
+      "description": "Base URL สำหรับ Open WebUI: `{{baseUrl}}/api/v1`\n\nauth ที่รับ: Sanctum token · Passport access token · OPENWEBUI_API_KEY + X-OpenWebUI-User-* headers",
+      "item": [
+        {
+          "name": "Models",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/models",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "models"
+              ]
+            },
+            "description": "โมเดลที่เลือกได้: `aura-agent` เสมอ, `freya-agent` เมื่อตั้ง FREYA_AGENT_URL + KEY แล้ว"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chat completions — AURA",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-OpenWebUI-Chat-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "รูปแบบ OpenAI · `model` เป็นตัวเลือก agent (ไม่รู้จัก/ว่าง = AURA)\n\nห้องแชทผูกกับ `X-OpenWebUI-Chat-Id` (ไม่ส่ง = hash ของคำถามแรก) · เปลี่ยน model กลางห้อง → 422 AGENT_MISMATCH",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{auraModel}}\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"มีกิจกรรมอะไรเปิดรับสมัครบ้าง\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chat completions — FREYA (stream)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-OpenWebUI-Chat-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "SSE แบบ OpenAI: `data: {chat.completion.chunk}` ... `data: [DONE]`",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{freyaModel}}\",\n  \"stream\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"เทอมนี้ลงกี่หน่วยกิต\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chat completions — Open WebUI service key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-OpenWebUI-User-Email",
+                "value": "{{userEmail}}"
+              },
+              {
+                "key": "X-OpenWebUI-User-Name",
+                "value": "Test%20User"
+              },
+              {
+                "key": "X-OpenWebUI-Chat-Id",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "จำลองการเรียกจาก Open WebUI: Bearer = `OPENWEBUI_API_KEY` + header ผู้ใช้ที่ Open WebUI ส่งต่อมา\n(ENABLE_FORWARD_USER_INFO_HEADERS=true) · อีเมลต้องอยู่ใน OPENWEBUI_ALLOWED_EMAIL_DOMAINS",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{freyaModel}}\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"ลาออกต้องทำอย่างไร\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{openwebuiApiKey}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Upstream agents (debug)",
+      "description": "เรียก agent ตรง ไม่ผ่าน backend ใช้ตรวจปัญหาเท่านั้น · ห้ามใช้ Service Key ในฝั่ง browser",
+      "item": [
+        {
+          "name": "AURA-AGENT health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{auraAgentUrl}}/v1/health",
+              "host": [
+                "{{auraAgentUrl}}"
+              ],
+              "path": [
+                "v1",
+                "health"
+              ]
+            },
+            "description": "ไม่ต้องใช้ key",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "FREYA-AGENT health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{freyaAgentUrl}}/v1/health",
+              "host": [
+                "{{freyaAgentUrl}}"
+              ],
+              "path": [
+                "v1",
+                "health"
+              ]
+            },
+            "description": "ไม่ต้องใช้ key · cache 10 วินาที · llm / registrar_db: ok | down | model_missing",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "FREYA-AGENT chat (direct, SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Service-Key",
+                "value": "{{freyaServiceKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{freyaAgentUrl}}/v1/chat",
+              "host": [
+                "{{freyaAgentUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat"
+              ]
+            },
+            "description": "เรียก Freya ตรง ตาม 01-api-contract · ไม่ส่ง Authorization = guest (thread_id ต้องเป็น UUID)\nevents: status · token · done · error",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"thread_id\": \"{{$guid}}\",\n  \"message\": \"เทอมนี้ลงกี่หน่วยกิต\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{passportAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "FREYA-AGENT delete thread (direct)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Service-Key",
+                "value": "{{freyaServiceKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{freyaAgentUrl}}/v1/chat/{{freyaThreadId}}",
+              "host": [
+                "{{freyaAgentUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "{{freyaThreadId}}"
+              ]
+            },
+            "description": "ต้องส่ง Authorization · ลบได้เฉพาะห้องของเจ้าของ token → 204",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{passportAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Logout",
+      "description": "ยกเลิก API token (รันเป็นอันสุดท้าย)",
+      "item": [
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "ยกเลิก API token ที่ใช้อยู่ → 204\n\nส่ง `{\"passport\": true}` เพื่อลืม Passport token ของผู้ใช้ด้วย → 200 `{passport_logout_url}` ให้ frontend เปิดต่อ\n\nอยู่ท้าย collection เพราะหลังจากนี้ `apiToken` ใช้ไม่ได้แล้ว",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"passport\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200 or 204\", () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "apiToken",
+      "value": "",
+      "description": "เติมอัตโนมัติจาก request Exchange"
+    },
+    {
+      "key": "sessionId",
+      "value": ""
+    },
+    {
+      "key": "freyaSessionId",
+      "value": ""
+    },
+    {
+      "key": "auraModel",
+      "value": "aura-agent"
+    },
+    {
+      "key": "freyaModel",
+      "value": "freya-agent"
+    }
+  ]
+}

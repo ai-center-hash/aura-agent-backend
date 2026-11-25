@@ -2,6 +2,7 @@
 
 namespace App\Services\Agent;
 
+use App\Enums\Agent;
 use App\Exceptions\UpstreamServiceException;
 use Generator;
 use Illuminate\Http\Client\ConnectionException;
@@ -12,17 +13,21 @@ use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Client for AURA-AGENT (/opt/aura-agent, docs/01-api-contract.md): a LangGraph
- * agent that answers students' activity questions from the Activity API.
+ * Client for one agent speaking the shared /v1/chat contract
+ * (docs/01-api-contract.md): AURA-AGENT (/opt/aura-agent, student activities)
+ * or FREYA-AGENT (registrar). One instance per agent, see AgentRegistry.
  *
- * Every call carries the service key plus the student's own YRU Passport
- * access token; the agent asks Passport who the student is.
+ * Every call carries the service key plus, normally, the user's own YRU
+ * Passport access token; the agent asks Passport who the user is.
  */
-class AuraAgentClient
+class AgentClient
 {
     public const UNAVAILABLE = 'ผู้ช่วยไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่อีกครั้ง';
 
-    public function __construct(private readonly array $config) {}
+    public function __construct(
+        public readonly Agent $agent,
+        private readonly array $config,
+    ) {}
 
     public function enabled(): bool
     {
@@ -42,26 +47,29 @@ class AuraAgentClient
      * status {text} · token {text} · done {thread_id, tools_used, latency_ms} · error {code, text}.
      * "error" arrives with HTTP 200 inside the stream, in place of "done".
      *
-     * Normally carries the student's own Passport token. With $actAs it uses the
-     * support mode instead (X-Support-Key + X-Act-As-* headers, no token).
+     * Normally carries the user's own Passport token. A null token (only for
+     * agents that allowsGuests()) asks as a guest: no Authorization header, and
+     * the thread_id must be a UUID. With $actAs it uses the support mode instead
+     * (X-Support-Key + X-Act-As-* headers, no token).
      *
      * @return Generator<int, array{event: string, data: array<string, mixed>}>
      */
     public function chat(?string $passportToken, string $threadId, string $message, ?ActAs $actAs = null): Generator
     {
         try {
-            $response = ($actAs ? $this->supportHttp($actAs) : $this->http((string) $passportToken))
+            $response = ($actAs ? $this->supportHttp($actAs) : $this->http($passportToken))
                 ->withOptions(['stream' => true])
                 ->accept('text/event-stream')
                 ->post('/v1/chat', ['thread_id' => $threadId, 'message' => $message])
                 ->throw();
         } catch (ConnectionException $e) {
-            throw new UpstreamServiceException('aura_agent', self::UNAVAILABLE, 503, $e, 'AGENT_UNAVAILABLE');
+            throw new UpstreamServiceException($this->agent->engine(), self::UNAVAILABLE, 503, $e, 'AGENT_UNAVAILABLE');
         } catch (RequestException $e) {
-            // 401 = wrong/missing service key (our config), 422 = body rejected.
-            Log::error('AURA-AGENT rejected the request', ['status' => $e->response->status(), 'body' => $e->response->body()]);
+            // 401 = wrong/missing service key (our config), 422 = body rejected,
+            // 503 = the agent has no SERVICE_KEY set.
+            Log::error($this->agent->label().' rejected the request', ['status' => $e->response->status(), 'body' => $e->response->body()]);
 
-            throw new UpstreamServiceException('aura_agent', self::UNAVAILABLE, 503, $e, 'AGENT_REJECTED');
+            throw new UpstreamServiceException($this->agent->engine(), self::UNAVAILABLE, 503, $e, 'AGENT_REJECTED');
         }
 
         $body = $response->toPsrResponse()->getBody();
@@ -96,14 +104,18 @@ class AuraAgentClient
         try {
             return $this->http($passportToken)->delete('/v1/chat/'.rawurlencode($threadId))->successful();
         } catch (Throwable $e) {
-            Log::warning('AURA-AGENT thread delete failed', ['error' => $e->getMessage()]);
+            Log::warning($this->agent->label().' thread delete failed',['error' => $e->getMessage()]);
 
             return false;
         }
     }
 
     /**
-     * @return array{status?: string, ollama?: string, activity_api?: string}
+     * GET /v1/health (no key needed). Fields differ per agent:
+     * AURA {status, ollama, activity_api} · FREYA {status, llm, registrar_db}.
+     * Each dependency is ok · down · model_missing; status is ok or degraded.
+     *
+     * @return array<string, string>
      */
     public function health(): array
     {
@@ -162,10 +174,10 @@ class AuraAgentClient
             ->timeout($this->config['timeout']);
     }
 
-    private function http(string $passportToken): PendingRequest
+    private function http(?string $passportToken): PendingRequest
     {
         return Http::baseUrl((string) $this->config['base_url'])
-            ->withToken($passportToken)
+            ->when($passportToken !== null, fn (PendingRequest $http) => $http->withToken((string) $passportToken))
             ->withHeader('X-Service-Key', (string) $this->config['service_key'])
             ->acceptJson()
             ->asJson()

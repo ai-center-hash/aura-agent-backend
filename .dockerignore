@@ -16,3 +16,5 @@ bootstrap/cache/*.php
 .vscode
 docker-compose.yml
 Dockerfile
+# Local SQLite databases (dev/testing only)
+database/*.sqlite*

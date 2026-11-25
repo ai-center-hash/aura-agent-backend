@@ -55,15 +55,17 @@ class HealthCheck extends Command
      */
     private function checks(): array
     {
-        return [
+        $checks = [
             'Backend (Laravel)' => fn () => $this->httpOk(config('monitoring.backend_url')),
-            'AURA-AGENT' => function () {
-                $base = rtrim((string) config('services.aura_agent.base_url'), '/');
-                $health = Http::timeout(5)->get($base.'/v1/health')->throw()->json();
-                throw_unless(($health['status'] ?? null) === 'ok', new \RuntimeException(json_encode($health)));
+            'AURA-AGENT' => fn () => $this->agentHealth('aura_agent'),
+        ];
 
-                return 'ollama '.($health['ollama'] ?? '?').' · activity_api '.($health['activity_api'] ?? '?');
-            },
+        // Not deployed yet: only watched once FREYA_AGENT_URL is set, so it doesn't alert meanwhile.
+        if (filled(config('services.freya_agent.base_url'))) {
+            $checks['FREYA-AGENT'] = fn () => $this->agentHealth('freya_agent');
+        }
+
+        return $checks + [
             'Ollama' => fn () => $this->httpOk(rtrim((string) config('services.ollama.base_url'), '/').'/api/tags'),
             'MySQL' => function () {
                 DB::select('select 1');
@@ -79,6 +81,19 @@ class HealthCheck extends Command
                 return sprintf('free %.1f%%', $free);
             },
         ];
+    }
+
+    /**
+     * GET /v1/health of an agent; lists every dependency it reports
+     * (AURA: ollama, activity_api · FREYA: llm, registrar_db).
+     */
+    private function agentHealth(string $service): string
+    {
+        $base = rtrim((string) config("services.{$service}.base_url"), '/');
+        $health = Http::timeout(5)->get($base.'/v1/health')->throw()->json();
+        throw_unless(($health['status'] ?? null) === 'ok', new \RuntimeException(json_encode($health)));
+
+        return collect($health)->except('status')->map(fn ($v, $k) => "{$k} {$v}")->implode(' · ');
     }
 
     private function httpOk(string $url): string

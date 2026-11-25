@@ -5,7 +5,7 @@ namespace App\Providers;
 use App\Http\Requests\ChatCompletionRequest;
 use App\Enums\UserRole;
 use App\Models\User;
-use App\Services\Agent\AuraAgentClient;
+use App\Services\Agent\AgentRegistry;
 use App\Services\Chat\ChatService;
 use App\Services\Llm\OllamaClient;
 use App\Services\YruPassport\YruPassportService;
@@ -23,12 +23,13 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        $this->app->singleton(AuraAgentClient::class, fn () => new AuraAgentClient(config('services.aura_agent')));
+        // config('services.aura_agent'), config('services.freya_agent'), ... (keyed by Agent::engine()).
+        $this->app->singleton(AgentRegistry::class, fn () => new AgentRegistry(config('services')));
         $this->app->singleton(OllamaClient::class, fn () => new OllamaClient(config('services.ollama')));
         $this->app->singleton(YruPassportService::class, fn () => new YruPassportService(config('services.yru_passport')));
 
         $this->app->singleton(ChatService::class, fn ($app) => new ChatService(
-            $app->make(AuraAgentClient::class),
+            $app->make(AgentRegistry::class),
             $app->make(YruPassportService::class),
         ));
     }
