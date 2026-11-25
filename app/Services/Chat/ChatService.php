@@ -2,13 +2,15 @@
 
 namespace App\Services\Chat;
 
+use App\Enums\Agent;
 use App\Enums\MessageRole;
 use App\Exceptions\UpstreamServiceException;
 use App\Models\ChatMessage;
 use App\Models\ChatSession;
 use App\Models\User;
 use App\Services\Agent\ActAs;
-use App\Services\Agent\AuraAgentClient;
+use App\Services\Agent\AgentClient;
+use App\Services\Agent\AgentRegistry;
 use App\Services\YruPassport\YruPassportService;
 use Generator;
 use Illuminate\Support\Facades\DB;
@@ -16,11 +18,12 @@ use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Chat pipeline: every answer comes from AURA-AGENT, which reads the
- * student's real data from the Activity API and keeps its own memory of
- * each conversation (thread_id). Laravel authenticates the student, passes
- * on their YRU Passport token, streams the answer through and keeps a copy
- * of the conversation for the history screens.
+ * Chat pipeline: every answer comes from an agent (App\Enums\Agent):
+ * AURA-AGENT (activities, Activity API) or FREYA-AGENT (registrar). The
+ * agent reads the user's real data and keeps its own memory of each
+ * conversation (thread_id), so a session stays with one agent. Laravel
+ * authenticates the user, passes on their YRU Passport token, streams the
+ * answer through and keeps a copy of the conversation for the history screens.
  *
  * Messages are only written after an answer is complete, and every question
  * leaves one ai_requests row (AiTrace).
@@ -32,19 +35,21 @@ class ChatService
     public const SUPPORT_UNAVAILABLE = 'ยังถามแทนนักศึกษาไม่ได้ ต้องรอให้ AURA-AGENT เปิดโหมดถามแทน (AURA_AGENT_SUPPORT_KEY)';
 
     public function __construct(
-        private readonly AuraAgentClient $agent,
+        private readonly AgentRegistry $agents,
         private readonly YruPassportService $passport,
     ) {}
 
     /**
      * Wait for the whole answer. With $actAs (already authorised by the
      * "view-student" gate) an admin or instructor asks about that student.
+     * $agent picks the agent of a new session (default AURA); for an existing
+     * session it must match, or be null.
      *
      * @return array{session: ChatSession, question: ChatMessage, message: ChatMessage}
      */
-    public function reply(User $user, string $question, ?int $sessionId = null, string $channel = 'api', ?ActAs $actAs = null): array
+    public function reply(User $user, string $question, ?int $sessionId = null, string $channel = 'api', ?ActAs $actAs = null, ?Agent $agent = null): array
     {
-        $session = $this->resolveSession($user, $sessionId, $question, $actAs);
+        $session = $this->resolveSession($user, $sessionId, $question, $actAs, $agent);
 
         return $this->drain($this->run($session, $question, $channel, $actAs));
     }
@@ -52,9 +57,9 @@ class ChatService
     /**
      * @return Generator<int, array<string, mixed>>
      */
-    public function stream(User $user, string $question, ?int $sessionId = null, string $channel = 'api_stream', ?ActAs $actAs = null): Generator
+    public function stream(User $user, string $question, ?int $sessionId = null, string $channel = 'api_stream', ?ActAs $actAs = null, ?Agent $agent = null): Generator
     {
-        $session = $this->resolveSession($user, $sessionId, $question, $actAs);
+        $session = $this->resolveSession($user, $sessionId, $question, $actAs, $agent);
 
         yield from $this->run($session, $question, $channel, $actAs);
     }
@@ -95,14 +100,27 @@ class ChatService
 
     /**
      * Find (or prepare, unsaved) the session mirroring a chat that lives in an
-     * external client such as Open WebUI.
+     * external client such as Open WebUI. A new session is bound to $agent;
+     * an existing one bound to another agent is refused (AGENT_MISMATCH),
+     * e.g. the user switched model in the middle of an Open WebUI chat.
      */
-    public function sessionForExternalChat(User $user, string $externalId, string $firstQuestion): ChatSession
+    public function sessionForExternalChat(User $user, string $externalId, string $firstQuestion, Agent $agent = Agent::Aura): ChatSession
     {
-        return $user->chatSessions()->firstOrNew(
+        $session = $user->chatSessions()->firstOrNew(
             ['external_id' => $externalId],
-            ['title' => Str::limit(Str::squish($firstQuestion), 60)],
+            ['title' => Str::limit(Str::squish($firstQuestion), 60), 'agent' => $agent],
         );
+
+        if ($session->agent !== $agent) {
+            throw new UpstreamServiceException($agent->engine(), self::agentMismatch($session->agent), 422, errorCode: 'AGENT_MISMATCH');
+        }
+
+        return $session;
+    }
+
+    public static function agentMismatch(Agent $sessionAgent): string
+    {
+        return "ห้องแชทนี้คุยกับ {$sessionAgent->label()} อยู่ กรุณาเริ่มแชทใหม่เพื่อเปลี่ยนผู้ช่วย";
     }
 
     /**
@@ -110,7 +128,9 @@ class ChatService
      */
     private function run(ChatSession $session, string $question, string $channel, ?ActAs $actAs = null): Generator
     {
-        $trace = AiTrace::start($channel, $session->user_id, $question, engine: 'aura_agent');
+        $agent = $session->agent;
+        $client = $this->agents->for($agent);
+        $trace = AiTrace::start($channel, $session->user_id, $question, engine: $agent->engine());
         $trace->actingAs($actAs?->studentCode);
         $session->agent_thread_id ??= (string) Str::uuid();
         $status = 'aborted';
@@ -118,12 +138,12 @@ class ChatService
         $result = null;
 
         try {
-            $token = $actAs ? $this->assertSupportMode() : $this->passportToken($session->user);
+            $token = $actAs ? $this->assertSupportMode($client) : $this->passportToken($client, $session->user);
 
-            $trace->llmStarted('aura-agent');
+            $trace->llmStarted(str_replace('_', '-', $agent->engine()));
             $content = '';
 
-            foreach ($this->agent->chat($token, $session->agent_thread_id, $question, $actAs) as $event) {
+            foreach ($client->chat($token, $session->agent_thread_id, $question, $actAs) as $event) {
                 $data = $event['data'];
 
                 switch ($event['event']) {
@@ -145,8 +165,8 @@ class ChatService
                         }
 
                         throw new UpstreamServiceException(
-                            'aura_agent',
-                            (string) ($data['text'] ?? AuraAgentClient::UNAVAILABLE),
+                            $agent->engine(),
+                            (string) ($data['text'] ?? AgentClient::UNAVAILABLE),
                             match ($code) {
                                 'TOKEN_EXPIRED' => 401,
                                 'NOT_STUDENT' => 403,
@@ -156,7 +176,7 @@ class ChatService
                         );
 
                     case 'done':
-                        // Token counts are null until AURA-AGENT reports them in its done event.
+                        // Token counts are null when the agent doesn't report them in its done event.
                         $stats = [
                             'tools_used' => $data['tools_used'] ?? [],
                             'latency_ms' => $data['latency_ms'] ?? null,
@@ -165,13 +185,14 @@ class ChatService
                         ];
                         $trace->llmFinished($stats);
 
-                        $result = $this->persist($session, $question, $content, $stats);
+                        $result = $this->persist($session, $question, $content, ['engine' => $agent->engine(), ...$stats]);
                         $status = 'success';
 
                         yield [
                             'type' => 'done',
                             'session_id' => $result['session']->id,
                             'message_id' => $result['message']->id,
+                            'agent' => $agent->value,
                             'acting_as' => $actAs?->studentCode,
                             'tools_used' => $stats['tools_used'],
                             'latency_ms' => $stats['latency_ms'],
@@ -182,7 +203,7 @@ class ChatService
                 }
             }
 
-            throw new UpstreamServiceException('aura_agent', AuraAgentClient::UNAVAILABLE, 503, errorCode: 'INCOMPLETE');
+            throw new UpstreamServiceException($agent->engine(), AgentClient::UNAVAILABLE, 503, errorCode: 'INCOMPLETE');
         } catch (Throwable $e) {
             $status = 'error';
             $error = $e instanceof UpstreamServiceException && $e->errorCode ? "{$e->errorCode}: {$e->getMessage()}" : $e->getMessage();
@@ -195,11 +216,16 @@ class ChatService
 
     /**
      * Support mode needs no Passport token (the agent looks the student up by code).
+     * Only AURA-AGENT has (will have) it; FREYA-AGENT's contract has no support mode.
      */
-    private function assertSupportMode(): null
+    private function assertSupportMode(AgentClient $client): null
     {
-        if (! $this->agent->supportEnabled()) {
-            throw new UpstreamServiceException('aura_agent', self::SUPPORT_UNAVAILABLE, 503, errorCode: 'SUPPORT_UNAVAILABLE');
+        if (! $client->supportEnabled()) {
+            $message = $client->agent === Agent::Aura
+                ? self::SUPPORT_UNAVAILABLE
+                : "{$client->agent->label()} ยังไม่รองรับการถามแทนนักศึกษา";
+
+            throw new UpstreamServiceException($client->agent->engine(), $message, 503, errorCode: 'SUPPORT_UNAVAILABLE');
         }
 
         return null;
@@ -210,14 +236,21 @@ class ChatService
      * agent (since AURA-AGENT 670a21a staff can search activity rounds and are
      * told personal progress is for students only), so no role filter here.
      */
-    private function passportToken(User $user): string
+    private function passportToken(AgentClient $client, User $user): ?string
     {
-        if (! $this->agent->enabled()) {
-            throw new UpstreamServiceException('aura_agent', AuraAgentClient::UNAVAILABLE, 503, errorCode: 'AGENT_UNAVAILABLE');
+        if (! $client->enabled()) {
+            throw new UpstreamServiceException($client->agent->engine(), AgentClient::UNAVAILABLE, 503, errorCode: 'AGENT_UNAVAILABLE');
         }
 
-        return $this->passport->accessTokenFor($user)
-            ?? throw new UpstreamServiceException('aura_agent', self::PASSPORT_REQUIRED, 401, errorCode: 'PASSPORT_REQUIRED');
+        $token = $this->passport->accessTokenFor($user);
+
+        // No Passport login: FREYA-AGENT still answers general registrar rules
+        // (guest mode, needs a UUID thread_id, which ours always is).
+        if ($token === null && ! $client->agent->allowsGuests()) {
+            throw new UpstreamServiceException($client->agent->engine(), self::PASSPORT_REQUIRED, 401, errorCode: 'PASSPORT_REQUIRED');
+        }
+
+        return $token;
     }
 
     /**
@@ -225,7 +258,7 @@ class ChatService
      * prepare an unsaved new one titled after the first question. A session is
      * tied to one subject: the user themself, or the one student asked about.
      */
-    private function resolveSession(User $user, ?int $sessionId, string $question, ?ActAs $actAs = null): ChatSession
+    private function resolveSession(User $user, ?int $sessionId, string $question, ?ActAs $actAs = null, ?Agent $agent = null): ChatSession
     {
         if ($sessionId !== null) {
             $session = $user->chatSessions()->findOrFail($sessionId);
@@ -236,12 +269,15 @@ class ChatService
                 'ห้องแชทนี้เป็นของนักศึกษาคนอื่น กรุณาเริ่มแชทใหม่',
             );
 
+            abort_unless($agent === null || $session->agent === $agent, 422, self::agentMismatch($session->agent));
+
             return $session;
         }
 
         $session = new ChatSession([
             'title' => Str::limit(($actAs ? "[{$actAs->studentCode}] " : '').Str::squish($question), 60),
             'acting_as_student' => $actAs?->studentCode,
+            'agent' => $agent ?? Agent::Aura,
         ]);
         $session->user()->associate($user);
 
@@ -250,7 +286,7 @@ class ChatService
 
     /**
      * Token usage of one answer, as sent to API clients. Every field is null
-     * when the engine did not report it (older messages, AURA-AGENT without usage).
+     * when the engine did not report it (older messages, agents without usage).
      *
      * @return array{prompt_tokens: ?int, completion_tokens: ?int, total_tokens: ?int}
      */
@@ -282,7 +318,7 @@ class ChatService
             $message = $session->messages()->create([
                 'role' => MessageRole::Assistant,
                 'content' => $answer,
-                'metadata' => ['engine' => 'aura_agent', ...$stats],
+                'metadata' => $stats,
             ]);
 
             return ['session' => $session, 'question' => $questionMessage, 'message' => $message];

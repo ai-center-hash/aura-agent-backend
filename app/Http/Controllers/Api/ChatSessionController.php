@@ -5,7 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\ChatSessionResource;
 use App\Models\AuditLog;
-use App\Services\Agent\AuraAgentClient;
+use App\Services\Agent\AgentRegistry;
 use App\Services\YruPassport\YruPassportService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -38,13 +38,16 @@ class ChatSessionController extends Controller
         return new ChatSessionResource($chatSession);
     }
 
-    public function destroy(Request $request, int $session, AuraAgentClient $agent, YruPassportService $passport): Response
+    public function destroy(Request $request, int $session, AgentRegistry $agents, YruPassportService $passport): Response
     {
         $chatSession = $request->user()->chatSessions()->findOrFail($session);
         $messageCount = $chatSession->messages()->count();
         $chatSession->delete();
 
-        // Also forget the agent's own memory of this conversation (best effort).
+        // Also forget the agent's own memory of this conversation (best effort). DELETE needs a
+        // Passport token; guest threads (FREYA-AGENT) are pruned by the agent after 1 day.
+        $agent = $agents->for($chatSession->agent);
+
         if ($chatSession->agent_thread_id && $agent->enabled() && ($token = $passport->accessTokenFor($request->user()))) {
             $agent->deleteThread($token, $chatSession->agent_thread_id);
         }

@@ -7,7 +7,8 @@ use App\Models\AuditLog;
 use App\Models\ChatMessage;
 use App\Models\ChatSession;
 use App\Models\User;
-use App\Services\Agent\AuraAgentClient;
+use App\Enums\Agent;
+use App\Services\Agent\AgentRegistry;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -36,20 +37,8 @@ class ConsoleController extends Controller
                 'users %d · sessions %d · messages %d',
                 User::count(), ChatSession::count(), ChatMessage::count(),
             )),
-            'agent' => $this->check(function () {
-                $agent = app(AuraAgentClient::class);
-                $base = config('services.aura_agent.base_url');
-
-                throw_unless($base, new \RuntimeException('AURA_AGENT_URL is not set'));
-
-                $health = $agent->health();
-                $detail = "{$base} · ollama {$health['ollama']} · activity_api {$health['activity_api']}";
-
-                throw_unless(($health['status'] ?? null) === 'ok', new \RuntimeException($detail));
-                throw_unless($agent->enabled(), new \RuntimeException($detail.' · AURA_AGENT_SERVICE_KEY is not set (chat is unavailable)'));
-
-                return $detail;
-            }),
+            'agent' => $this->check(fn () => $this->agentHealth(Agent::Aura)),
+            'freya' => $this->check(fn () => $this->agentHealth(Agent::Freya)),
             // Only Open WebUI's background jobs (chat titles, tags) use Ollama directly.
             'ollama' => $this->check(function () {
                 $model = config('services.ollama.model');
@@ -62,6 +51,27 @@ class ConsoleController extends Controller
                 return $model.' · Open WebUI titles/tags only';
             }),
         ]);
+    }
+
+    /**
+     * GET /v1/health of one agent. Its dependency fields differ (AURA: ollama,
+     * activity_api · FREYA: llm, registrar_db), so all of them are listed.
+     */
+    private function agentHealth(Agent $agent): string
+    {
+        $client = app(AgentRegistry::class)->for($agent);
+        $base = config("services.{$agent->engine()}.base_url");
+        $env = strtoupper($agent->engine());
+
+        throw_unless($base, new \RuntimeException("{$env}_URL is not set"));
+
+        $health = $client->health();
+        $detail = collect($health)->except('status')->map(fn ($v, $k) => "{$k} {$v}")->prepend($base)->implode(' · ');
+
+        throw_unless(($health['status'] ?? null) === 'ok', new \RuntimeException($detail));
+        throw_unless($client->enabled(), new \RuntimeException("{$detail} · {$env}_SERVICE_KEY is not set (chat is unavailable)"));
+
+        return $detail;
     }
 
     public function logs(Request $request): View

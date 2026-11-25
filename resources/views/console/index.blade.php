@@ -354,7 +354,7 @@
         const res = await api('/console/status');
         if (!res.ok) { box.textContent = await errorMessage(res); return; }
         const data = await res.json();
-        const labels = { agent: 'AURA-AGENT', database: 'MySQL', ollama: 'Ollama (Open WebUI)' };
+        const labels = { agent: 'AURA-AGENT', freya: 'FREYA-AGENT', database: 'MySQL', ollama: 'Ollama (Open WebUI)' };
         box.replaceChildren();
         const grid = el('div', 'status-row');
         for (const [key, label] of Object.entries(labels)) {

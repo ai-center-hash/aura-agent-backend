@@ -61,6 +61,15 @@ return [
         'timeout' => (int) env('AURA_AGENT_TIMEOUT', 180),
     ],
 
+    // FREYA-AGENT: registrar questions (enrolment, grades, graduation check, fees).
+    // Same /v1/chat contract as AURA-AGENT, no support mode. Users without a Passport
+    // login may ask it as guests (general rules only). Disabled until URL and key are set.
+    'freya_agent' => [
+        'base_url' => env('FREYA_AGENT_URL'),
+        'service_key' => env('FREYA_AGENT_SERVICE_KEY'),
+        'timeout' => (int) env('FREYA_AGENT_TIMEOUT', 180),
+    ],
+
     // Only used for Open WebUI background jobs (chat titles, tags); answers come from AURA-AGENT.
     'ollama' => [
         'base_url' => env('OLLAMA_URL', 'http://127.0.0.1:11434'),
