@@ -57,3 +57,39 @@ If you discover a security vulnerability within Laravel, please send an e-mail t
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
 # aura-agent-backend
+
+## ทดสอบบนเครื่อง (ไม่ต้องมี agent จริง)
+
+ต้องมี PHP 8.3+ (เปิด extension `pdo_sqlite`, `sqlite3`) และ Composer
+
+```sh
+composer install
+cp .env.example .env
+php artisan key:generate
+```
+
+แก้ `.env` ให้ใช้ SQLite และ mock agent:
+
+```dotenv
+DB_CONNECTION=sqlite            # ใส่ # หน้า DB_HOST … DB_PASSWORD
+AURA_AGENT_URL=http://127.0.0.1:8199
+AURA_AGENT_SERVICE_KEY=local-mock-key
+FREYA_AGENT_URL=http://127.0.0.1:8199
+FREYA_AGENT_SERVICE_KEY=local-mock-key
+```
+
+```sh
+touch database/database.sqlite          # PowerShell: New-Item database/database.sqlite
+php artisan migrate
+php artisan app:create-admin admin@aura.local   # ถามรหัสผ่าน (อย่างน้อย 8 ตัว)
+
+php -S 127.0.0.1:8199 dev/mock-agent.php        # terminal 1: mock AURA/FREYA
+php artisan serve                               # terminal 2: http://localhost:8000
+```
+
+เปิด http://localhost:8000/login แล้ว login ด้วย admin ที่สร้าง ในหน้าแชทเลือก AURA-AGENT หรือ FREYA-AGENT ได้ก่อนเริ่มแชทใหม่
+
+- admin ที่ login ด้วยรหัสผ่านไม่มี YRU Passport token: AURA จะตอบ `PASSPORT_REQUIRED` ส่วน FREYA ตอบแบบผู้ใช้ทั่วไป (กติกากลาง)
+- mock: ข้อความที่มีคำว่า `expired` → `TOKEN_EXPIRED`, `down` → `LLM_UNAVAILABLE` (ดูหัวไฟล์ `dev/mock-agent.php`)
+- การ์ด Ollama ในสถานะระบบจะขึ้น "ขัดข้อง" ถ้าไม่ได้รัน Ollama (ใช้แค่สร้างชื่อแชทใน Open WebUI)
+- เทส: `php artisan test` · Postman: `docs/postman/` (environment ตั้ง `baseUrl` เป็น http://localhost:8000)
